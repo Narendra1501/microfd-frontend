@@ -204,6 +204,21 @@ const AdminDashboard = () => {
             setActionLoading(false);
         }
     };
+
+    const handleClearChats = async () => {
+        if (!window.confirm('Are you sure you want to clear all chat messages?')) return;
+        
+        setActionLoading(true);
+        try {
+            await api.delete('/chats/clear');
+            toast.success('All chat messages cleared successfully');
+            fetchChats();
+        } catch (error) {
+            toast.error(error.response?.data?.message || 'Failed to clear chats');
+        } finally {
+            setActionLoading(false);
+        }
+    };
     
     const handleUnitClick = (unitTitle) => {
         const note = notes.find(n => n.unitNumber === unitTitle);
@@ -759,9 +774,12 @@ const AdminDashboard = () => {
                                 </div>
                             </AnimatedCard>
                         </div>
+                    </div>
+                </motion.div>
+            )}
 
-                        {/* Class Chat Group Management */}
-                        <div className="mt-16 pt-12 border-t-2 border-slate-100">
+            {/* Class Chat Group Management */}
+            <div className="mt-16 pt-12 border-t-2 border-slate-100 relative z-20">
                             <div className="flex items-center space-x-3 mb-8">
                                 <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-500 to-indigo-700 flex items-center justify-center shadow-lg text-white">
                                     <MessageSquare className="w-5 h-5" />
@@ -781,7 +799,16 @@ const AdminDashboard = () => {
                                         </span>
                                         <span className="text-sm font-bold text-slate-700">Live Global Chat</span>
                                     </div>
-                                    <span className="text-xs font-bold bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full uppercase">Admin View</span>
+                                    <div className="flex items-center space-x-3">
+                                        <span className="text-xs font-bold bg-indigo-100 text-indigo-700 px-3 py-1 rounded-full uppercase">Admin View</span>
+                                        <button 
+                                            onClick={handleClearChats}
+                                            disabled={actionLoading}
+                                            className="text-xs font-bold bg-rose-100 hover:bg-rose-200 text-rose-700 px-3 py-1 rounded-full uppercase transition-colors"
+                                        >
+                                            Clear Chat
+                                        </button>
+                                    </div>
                                 </div>
 
                                 {/* Chat Transcript View */}
@@ -835,10 +862,7 @@ const AdminDashboard = () => {
                                 </form>
                             </AnimatedCard>
 
-                        </div>
-                    </div>
-                </motion.div>
-            )}
+            </div>
 
             {/* Upload Modal */}
             <AnimatePresence>
