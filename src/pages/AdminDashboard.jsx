@@ -25,10 +25,11 @@ import {
     ExternalLink,
     PlayCircle,
     BookOpen,
-    ShieldCheck
+    ShieldCheck,
+    Upload
 } from 'lucide-react';
 import { LineChart, Line, BarChart, Bar, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer } from 'recharts';
-import { format } from 'date-fns';
+import { differenceInDays, parseISO, startOfDay, format } from 'date-fns';
 
 import AnimatedCard from '../components/AnimatedCard';
 import ChartCard from '../components/ChartCard';
@@ -36,43 +37,100 @@ import SubjectHeader from '../components/SubjectHeader';
 import BackgroundAnimation from '../components/BackgroundAnimation';
 import { useAuth } from '../context/AuthContext';
 
+const groupFeedbacksByWeek = (feedbacks) => {
+    if (!feedbacks || !feedbacks.length) return [];
+    
+    // Sort by date ascending to find the earliest date
+    const sorted = [...feedbacks].sort((a, b) => new Date(a.dateString) - new Date(b.dateString));
+    const earliestDate = startOfDay(parseISO(sorted[0].dateString));
+    
+    const weeksMap = {};
+    
+    feedbacks.forEach(fb => {
+        const currentDate = startOfDay(parseISO(fb.dateString));
+        const diff = differenceInDays(currentDate, earliestDate);
+        const weekNum = Math.floor(diff / 7) + 1;
+        
+        if (!weeksMap[weekNum]) {
+            weeksMap[weekNum] = {
+                weekNum,
+                feedbacks: [],
+                totalSubmissions: 0,
+                ratingsSum: { lifeSkills: 0, learningExperience: 0, teacherReach: 0, overall: 0 }
+            };
+        }
+        weeksMap[weekNum].feedbacks.push(fb);
+        weeksMap[weekNum].totalSubmissions += 1;
+        weeksMap[weekNum].ratingsSum.lifeSkills += fb.ratings?.lifeSkills || 0;
+        weeksMap[weekNum].ratingsSum.learningExperience += fb.ratings?.learningExperience || 0;
+        weeksMap[weekNum].ratingsSum.teacherReach += fb.ratings?.teacherReach || 0;
+        weeksMap[weekNum].ratingsSum.overall += fb.ratings?.overall || 0;
+    });
+    
+    return Object.values(weeksMap).sort((a, b) => a.weekNum - b.weekNum).map(w => ({
+        ...w,
+        summary: {
+            lifeSkills: w.ratingsSum.lifeSkills / w.totalSubmissions,
+            learningExperience: w.ratingsSum.learningExperience / w.totalSubmissions,
+            teacherReach: w.ratingsSum.teacherReach / w.totalSubmissions,
+            overall: w.ratingsSum.overall / w.totalSubmissions,
+            totalSubmissions: w.totalSubmissions
+        }
+    }));
+};
+
+const studyUnits = [
+    { id: 1, title: 'Unit 1' },
+    { id: 2, title: 'Unit 2' },
+    { id: 3, title: 'Unit 3' },
+    { id: 4, title: 'Unit 4' },
+    { id: 5, title: 'Unit 5' },
+];
 
 const AdminDashboard = () => {
     const { user } = useAuth();
-    const [summary, setSummary] = useState(null);
-    const [trends, setTrends] = useState([]);
     const [semesterOverall, setSemesterOverall] = useState(null);
     const [allFeedbacks, setAllFeedbacks] = useState([]);
+    const [weeklyData, setWeeklyData] = useState([]);
+    const [selectedWeek, setSelectedWeek] = useState(null); // Will hold the week object
     const [chats, setChats] = useState([]);
+    const [notes, setNotes] = useState([]);
     const [isLoading, setIsLoading] = useState(true);
     const [actionLoading, setActionLoading] = useState(false);
-    const [selectedDate, setSelectedDate] = useState(null); // string 'yyyy-MM-dd'
     const [chatMessage, setChatMessage] = useState('');
-    const chatContainerRef = useRef(null);
+    const [isUploadingNote, setIsUploadingNote] = useState(false);
+    
+    // Upload modal state
+    const [showUploadModal, setShowUploadModal] = useState(false);
+    const [selectedUnitForUpload, setSelectedUnitForUpload] = useState(null);
+    const [selectedFile, setSelectedFile] = useState(null);
 
-    const fetchData = async (targetDate = null) => {
+    const chatContainerRef = useRef(null);
+    const fileInputRef = useRef(null);
+
+    const fetchData = async () => {
         setIsLoading(true);
         try {
-            let summaryUrl = '/admin/daily-summary';
-            if (targetDate) {
-                summaryUrl += `?dateString=${targetDate}`;
-            }
-
-            const [summaryRes, trendsRes, semesterRes, feedbacksRes] = await Promise.all([
-                api.get(summaryUrl),
-                api.get('/admin/trends'),
+            const [semesterRes, feedbacksRes, notesRes] = await Promise.all([
                 api.get('/admin/semester-overall'),
-                api.get('/admin/feedbacks')
+                api.get('/admin/feedbacks'),
+                api.get('/notes').catch(() => ({ data: { data: [] } }))
             ]);
 
-            const currentSummary = summaryRes.data.data;
-            setSummary(currentSummary);
-            setTrends(trendsRes.data.data);
             setSemesterOverall(semesterRes.data.data);
-            setAllFeedbacks(feedbacksRes.data.data);
-
-            if (!targetDate && currentSummary && currentSummary.dateString) {
-                setSelectedDate(currentSummary.dateString);
+            const feedbacksDb = feedbacksRes.data.data;
+            setAllFeedbacks(feedbacksDb);
+            setNotes(notesRes.data.data || []);
+            
+            const grouped = groupFeedbacksByWeek(feedbacksDb);
+            setWeeklyData(grouped);
+            
+            // Default to latest week
+            if (grouped.length > 0) {
+                // Keep the current week selected if possible, else the latest
+                setSelectedWeek(prev => prev ? grouped.find(w => w.weekNum === prev.weekNum) || grouped[grouped.length - 1] : grouped[grouped.length - 1]);
+            } else {
+                setSelectedWeek(null);
             }
         } catch (error) {
             console.error('Error fetching analytics:', error);
@@ -131,32 +189,6 @@ const AdminDashboard = () => {
         }
     };
 
-    const handleResetDaily = async () => {
-        if (!summary || !summary.dateString) {
-            toast.error('No current daily data to reset.');
-            return;
-        }
-        if (!window.confirm(`Are you sure you want to clear all feedback for ${summary.dateString}?`)) return;
-        
-        setActionLoading(true);
-        try {
-            await api.delete('/admin/reset-daily', { 
-                data: { dateString: summary.dateString } 
-            });
-            toast.success(`${summary.dateString} data reset successfully`);
-            fetchData();
-        } catch (error) {
-            toast.error(error.response?.data?.message || 'Failed to reset daily data');
-            setActionLoading(false);
-        }
-    };
-
-    const handleDateClick = (trendItem) => {
-        const target = trendItem._id.dateString;
-        setSelectedDate(target);
-        fetchData(target);
-    };
-
     const handleChatSubmit = async (e) => {
         e.preventDefault();
         if (!chatMessage.trim()) return;
@@ -170,6 +202,58 @@ const AdminDashboard = () => {
             toast.error(error.response?.data?.message || 'Failed to send message');
         } finally {
             setActionLoading(false);
+        }
+    };
+    
+    const handleUnitClick = (unitTitle) => {
+        const note = notes.find(n => n.unitNumber === unitTitle);
+        if (note && note.filePath) {
+            const baseUrl = import.meta.env.VITE_API_URL || 'http://localhost:5000';
+            window.open(`${baseUrl}${note.filePath}`, '_blank');
+        } else {
+            // No note exists yet, open upload modal
+            setSelectedUnitForUpload(unitTitle);
+            setShowUploadModal(true);
+        }
+    };
+    
+    const handleUploadClick = (e, unitTitle) => {
+        e.stopPropagation();
+        setSelectedUnitForUpload(unitTitle);
+        setShowUploadModal(true);
+    };
+
+    const handleFileChange = (e) => {
+        if (e.target.files && e.target.files[0]) {
+            const file = e.target.files[0];
+            if (file.type !== 'application/pdf') {
+                toast.error("Please upload only PDF files.");
+                return;
+            }
+            setSelectedFile(file);
+        }
+    };
+
+    const submitNoteUpload = async () => {
+        if (!selectedFile || !selectedUnitForUpload) return;
+        
+        setIsUploadingNote(true);
+        const formData = new FormData();
+        formData.append('note', selectedFile);
+        formData.append('unitNumber', selectedUnitForUpload);
+        
+        try {
+            await api.post('/notes', formData, {
+                headers: { 'Content-Type': 'multipart/form-data' }
+            });
+            toast.success(`${selectedUnitForUpload} notes uploaded!`);
+            setShowUploadModal(false);
+            setSelectedFile(null);
+            fetchData(); // refresh notes
+        } catch (error) {
+            toast.error(error.response?.data?.message || 'Upload failed');
+        } finally {
+            setIsUploadingNote(false);
         }
     };
 
@@ -189,37 +273,33 @@ const AdminDashboard = () => {
         );
     }
 
-    const hasData = summary && summary.totalSubmissions > 0;
+    const hasData = weeklyData.length > 0;
     
-    // Convert new format back into structure for generic bar chart
-    const questionsData = hasData ? [
-        { subject: 'Life Skills', score: Number((summary.lifeSkills || 0).toFixed(2)) },
-        { subject: 'Learning Ex.', score: Number((summary.learningExperience || 0).toFixed(2)) },
-        { subject: 'Teacher R.', score: Number((summary.teacherReach || 0).toFixed(2)) },
-        { subject: 'Overall', score: Number((summary.overall || 0).toFixed(2)) }
+    // Questions data mapped from selected week's summary
+    const questionsData = selectedWeek ? [
+        { subject: 'Life Skills', score: Number((selectedWeek.summary.lifeSkills || 0).toFixed(2)) },
+        { subject: 'Learning Ex.', score: Number((selectedWeek.summary.learningExperience || 0).toFixed(2)) },
+        { subject: 'Teacher R.', score: Number((selectedWeek.summary.teacherReach || 0).toFixed(2)) },
+        { subject: 'Overall', score: Number((selectedWeek.summary.overall || 0).toFixed(2)) }
     ] : [];
 
     let bestMetric = { name: 'N/A', score: 0 };
     let lowestMetric = { name: 'N/A', score: 0 };
 
-    if (hasData) {
+    if (selectedWeek) {
         bestMetric = questionsData.reduce((prev, curr) => (prev.score > curr.score) ? prev : curr);
         lowestMetric = questionsData.reduce((prev, curr) => (prev.score < curr.score) ? prev : curr);
     }
 
-    const trendData = trends.map(t => {
-        const d = new Date(t._id.dateString);
-        return {
-            period: format(d, "MMM dd"),
-            overall: Number((t.overall || 0).toFixed(2)),
-            total: t.totalSubmissions
-        };
-    });
+    const trendData = weeklyData.map(w => ({
+        period: `Week ${w.weekNum}`,
+        overall: Number((w.summary.overall || 0).toFixed(2)),
+        total: w.summary.totalSubmissions
+    }));
 
-
-    const pieData = hasData ? [
-        { name: 'Satisfaction Score', value: Number((summary.overall || 0).toFixed(2)) },
-        { name: 'Gap', value: Number((5 - (summary.overall || 0)).toFixed(2)) }
+    const pieData = selectedWeek ? [
+        { name: 'Satisfaction Score', value: Number((selectedWeek.summary.overall || 0).toFixed(2)) },
+        { name: 'Gap', value: Number((5 - (selectedWeek.summary.overall || 0)).toFixed(2)) }
     ] : [];
 
     const pieColors = ['#8b5cf6', '#f1f5f9'];
@@ -244,7 +324,7 @@ const AdminDashboard = () => {
             <SubjectHeader 
                 subjectName="Digital Communication"
                 courseCode="ECUC1110"
-                subtitle="Daily Teaching Analytics"
+                subtitle="Teacher Dashboard & Analytics"
             >
                 <div className="mt-4 sm:mt-0 px-5 py-2.5 bg-brand-800/50 backdrop-blur-md rounded-xl border border-white/20 shadow-xl self-end sm:self-auto flex items-center shrink-0">
                     <Activity className="w-5 h-5 mr-3 text-cyan-300" />
@@ -257,9 +337,50 @@ const AdminDashboard = () => {
                     </div>
                 </div>
             </SubjectHeader>
+            
+            {/* Faculty Notes Uploading Section */}
+            <section className="mt-8 mb-12">
+                <div className="flex items-center justify-between mb-6">
+                    <h2 className="text-xl font-bold text-white flex items-center">
+                        <BookOpen className="w-5 h-5 mr-2 text-brand-300" />
+                        Study Notes Portal
+                    </h2>
+                    <span className="text-xs font-bold text-brand-200 bg-white/10 px-3 py-1 rounded-full border border-white/20">Faculty Upload Area</span>
+                </div>
+                <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-4">
+                    {studyUnits.map((unit) => {
+                        const note = notes.find(n => n.unitNumber === unit.title);
+                        const isAvailable = !!(note && note.filePath);
+                        return (
+                            <motion.div
+                                key={unit.id}
+                                whileHover={{ scale: 1.05, y: -5, boxShadow: '0 10px 15px -3px rgb(0 0 0 / 0.1)' }}
+                                className={`relative p-4 rounded-2xl border-2 transition-all flex flex-col items-center justify-center space-y-2 h-32 ${
+                                    isAvailable 
+                                    ? 'bg-white border-brand-100 text-brand-700 shadow-sm cursor-pointer hover:border-brand-300' 
+                                    : 'bg-slate-50 border-slate-200 text-slate-400 cursor-pointer border-dashed hover:bg-slate-100'
+                                }`}
+                                onClick={() => handleUnitClick(unit.title)}
+                            >
+                                <span className="font-bold text-lg">{unit.title}</span>
+                                <span className="text-[10px] uppercase font-bold tracking-widest">
+                                    {isAvailable ? 'View Notes' : 'Upload Needed'}
+                                </span>
+                                
+                                <button 
+                                    onClick={(e) => handleUploadClick(e, unit.title)}
+                                    className={`absolute top-2 right-2 p-1.5 rounded-lg ${isAvailable ? 'bg-brand-50 text-brand-500 hover:bg-brand-100' : 'bg-slate-200 text-slate-500 hover:bg-brand-50 hover:text-brand-500'}`}
+                                >
+                                    <Upload className="w-3.5 h-3.5" />
+                                </button>
+                            </motion.div>
+                        );
+                    })}
+                </div>
+            </section>
 
-            {!hasData && trends.length === 0 ? (
-                <AnimatedCard className="max-w-2xl mx-auto text-center py-20 px-10 border-brand-100 shadow-xl mt-12">
+            {!hasData ? (
+                <AnimatedCard className="max-w-2xl mx-auto text-center py-20 px-10 border-brand-100 shadow-xl mt-12 bg-white/90 backdrop-blur-md">
                     <motion.div 
                         initial={{ scale: 0.8, rotate: -10 }}
                         animate={{ scale: 1, rotate: 0 }}
@@ -270,7 +391,7 @@ const AdminDashboard = () => {
                     </motion.div>
                     <h3 className="text-3xl font-extrabold text-slate-900 mb-4 tracking-tight">No Insights Available</h3>
                     <p className="text-slate-500 mb-8 max-w-md mx-auto text-lg leading-relaxed">
-                        Data will automatically populate here once students begin submitting their daily feedback.
+                        Data will automatically populate here once students begin submitting their daily feedback. Weekly analysis will be generated sequentially.
                     </p>
                     <button onClick={fetchData} className="btn-primary inline-flex items-center space-x-2 px-8 py-3 rounded-full text-sm">
                         <RefreshCw className="w-4 h-4 mr-2" />
@@ -280,38 +401,29 @@ const AdminDashboard = () => {
             ) : (
                 <motion.div variants={containerVariants} initial="hidden" animate="show" className="space-y-8">
                     
-                    {/* Controls & Selectors */}
-                    <AnimatedCard className="p-5 bg-white/60 backdrop-blur-xl border border-white/50 shadow-xl shadow-brand-500/5 flex flex-col md:flex-row md:items-center justify-between gap-4 sticky top-6 z-30 rounded-3xl">
-                        <div className="flex items-center space-x-3">
+                    {/* Controls & Selectors for Weeks */}
+                    <AnimatedCard className="p-2 bg-white/60 backdrop-blur-xl border border-white/50 shadow-xl shadow-brand-500/5 flex flex-col md:flex-row md:items-center justify-between gap-4 sticky top-6 z-30 rounded-3xl">
+                        <div className="flex items-center space-x-3 px-3 py-2">
                             <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-brand-500 to-indigo-600 flex items-center justify-center shadow-lg text-white">
                                 <TrendingUp className="w-5 h-5" />
                             </div>
                             <div>
-                                <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">Tracking Overview</h1>
+                                <h1 className="text-xl font-extrabold text-slate-900 tracking-tight">Weekly Analysis</h1>
                                 <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Metrics Control Matrix</p>
                             </div>
                         </div>
 
-                        <div className="flex items-center space-x-3">
-                            {/* Date Picker (Replacement for Month dropdown) */}
-                            <div className="relative group">
-                                <Calendar className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 group-focus-within:text-brand-500 z-10" />
-                                <input 
-                                    type="date"
-                                    value={selectedDate || ''}
-                                    onChange={(e) => {
-                                        if (e.target.value) {
-                                            setSelectedDate(e.target.value);
-                                            fetchData(e.target.value);
-                                        }
-                                    }}
-                                    max={format(new Date(), 'yyyy-MM-dd')}
-                                    className="pl-9 pr-4 py-2 bg-white appearance-none border border-slate-200 rounded-xl text-sm font-bold text-slate-700 outline-none focus:ring-2 focus:ring-brand-500 cursor-pointer shadow-sm relative z-0 w-[160px]"
-                                />
-                                <ChevronRight className="absolute right-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400 mix-blend-multiply pointer-events-none" />
-                            </div>
-
-                            <button onClick={() => fetchData(selectedDate)} className="p-2.5 bg-slate-100 hover:bg-brand-50 text-slate-600 hover:text-brand-600 rounded-xl transition-colors border border-slate-200">
+                        <div className="flex flex-wrap items-center gap-2 p-2 bg-white rounded-2xl border border-slate-100 shadow-sm">
+                            {weeklyData.map(w => (
+                                <button
+                                    key={w.weekNum}
+                                    onClick={() => setSelectedWeek(w)}
+                                    className={`px-4 py-2 rounded-xl text-sm font-bold transition-all ${selectedWeek?.weekNum === w.weekNum ? 'bg-brand-600 text-white shadow-md shadow-brand-500/30' : 'bg-slate-50 text-slate-600 hover:bg-slate-100'}`}
+                                >
+                                    Week {w.weekNum}
+                                </button>
+                            ))}
+                            <button onClick={fetchData} className="p-2.5 ml-2 bg-slate-100 hover:bg-brand-50 text-slate-600 hover:text-brand-600 rounded-xl transition-colors border border-slate-200">
                                 <RefreshCw className="w-4 h-4" />
                             </button>
                         </div>
@@ -323,8 +435,8 @@ const AdminDashboard = () => {
                             <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-brand-100 to-transparent rounded-bl-full opacity-50 transition-transform group-hover:scale-110"></div>
                             <div className="flex justify-between items-start relative z-10">
                                 <div>
-                                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Average Rating</p>
-                                    <h3 className="text-4xl font-extrabold text-slate-900 tracking-tighter">{(summary?.overall || 0).toFixed(1)}</h3>
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Week Average Rating</p>
+                                    <h3 className="text-4xl font-extrabold text-slate-900 tracking-tighter">{(selectedWeek?.summary?.overall || 0).toFixed(1)}</h3>
                                 </div>
                                 <div className="p-3 bg-brand-50 rounded-2xl text-brand-600 shadow-sm border border-brand-100">
                                     <Star className="w-6 h-6 fill-current" />
@@ -340,8 +452,8 @@ const AdminDashboard = () => {
                             <div className="absolute top-0 right-0 w-24 h-24 bg-gradient-to-bl from-indigo-100 to-transparent rounded-bl-full opacity-50 transition-transform group-hover:scale-110"></div>
                             <div className="flex justify-between items-start relative z-10">
                                 <div>
-                                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Total Submissions</p>
-                                    <h3 className="text-4xl font-extrabold text-slate-900 tracking-tighter">{summary?.totalSubmissions || 0}</h3>
+                                    <p className="text-[10px] font-black uppercase tracking-widest text-slate-400 mb-1">Week Submissions</p>
+                                    <h3 className="text-4xl font-extrabold text-slate-900 tracking-tighter">{selectedWeek?.totalSubmissions || 0}</h3>
                                 </div>
                                 <div className="p-3 bg-indigo-50 rounded-2xl text-indigo-600 shadow-sm border border-indigo-100">
                                     <Users className="w-6 h-6" />
@@ -393,9 +505,9 @@ const AdminDashboard = () => {
                                 <div>
                                     <h3 className="text-xl font-extrabold text-slate-900 flex items-center tracking-tight">
                                         <TrendingUp className="w-6 h-6 mr-2 text-brand-500" />
-                                        Daily Performance History
+                                        Weekly Performance History
                                     </h3>
-                                    <p className="text-sm text-slate-500 mt-1 font-medium">Tracking aggregate feedback ratings across testing cycles.</p>
+                                    <p className="text-sm text-slate-500 mt-1 font-medium">Tracking aggregate feedback ratings across all weeks.</p>
                                 </div>
                             </div>
                             <div className="h-[350px] w-full">
@@ -435,7 +547,7 @@ const AdminDashboard = () => {
                             
                             <h3 className="text-xl font-bold text-white flex items-center mb-6 relative z-10">
                                 <Calendar className="w-5 h-5 mr-2 text-brand-400" />
-                                Daily Overview {summary && <span className="text-xs font-black bg-white/10 px-2 py-1 rounded ml-3">N={summary.totalSubmissions}</span>}
+                                {selectedWeek ? `Week ${selectedWeek.weekNum} Overview` : 'Overview'}
                             </h3>
 
                             <div className="h-[220px] relative z-10">
@@ -464,7 +576,7 @@ const AdminDashboard = () => {
                                 
                                 <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
                                     <span className="text-3xl font-black text-white leading-none">
-                                        {((summary?.overall || 0) * 20).toFixed(0)}%
+                                        {((selectedWeek?.summary?.overall || 0) * 20).toFixed(0)}%
                                     </span>
                                     <span className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mt-1">Satisfaction</span>
                                 </div>
@@ -473,28 +585,28 @@ const AdminDashboard = () => {
                             <div className="mt-6 space-y-3 relative z-10">
                                 <div className="flex justify-between items-center p-3 bg-white/5 rounded-xl border border-white/10">
                                     <span className="text-sm font-medium text-slate-300">Achieved Score</span>
-                                    <span className="text-sm font-bold text-white bg-brand-500 px-2.5 py-1 rounded-lg">{(summary?.overall || 0).toFixed(2)}</span>
+                                    <span className="text-sm font-bold text-white bg-brand-500 px-2.5 py-1 rounded-lg">{(selectedWeek?.summary?.overall || 0).toFixed(2)}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white/5 rounded-xl border border-white/10">
                                     <span className="text-sm font-medium text-slate-300">Growth Gap</span>
-                                    <span className="text-sm font-bold text-white bg-slate-700 px-2.5 py-1 rounded-lg">{(5 - (summary?.overall || 0)).toFixed(2)}</span>
+                                    <span className="text-sm font-bold text-white bg-slate-700 px-2.5 py-1 rounded-lg">{(5 - (selectedWeek?.summary?.overall || 0)).toFixed(2)}</span>
                                 </div>
                             </div>
                         </ChartCard>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
-                        {/* Day Selector Navigation Hub */}
+                    <div className="grid grid-cols-1 lg:grid-cols-4 gap-6 mt-6">
+                        {/* Selected Navigator Info */}
                         <div className="lg:col-span-1 flex flex-col space-y-4">
                             <AnimatedCard delay={0.6} className="bg-white border text-center p-6 border-slate-100 shadow-xl rounded-3xl h-full flex flex-col justify-center items-center">
                                 <Calendar className="w-12 h-12 text-brand-500 mb-4" />
-                                <h3 className="text-lg font-bold text-slate-800 tracking-tight">Daily Feedback Navigator</h3>
-                                <p className="text-sm text-slate-500 mt-2 leading-relaxed">Select a date from the tracking overview above or wait for automatic selection of the latest metrics available.</p>
+                                <h3 className="text-lg font-bold text-slate-800 tracking-tight">Active Week Selection</h3>
+                                <p className="text-sm text-slate-500 mt-2 leading-relaxed">Metrics and feedback table are currently filtered to show results for the selected week period.</p>
                                 
-                                {selectedDate && (
+                                {selectedWeek && (
                                     <div className="mt-6 px-6 py-3 bg-brand-50 text-brand-700 rounded-2xl text-sm font-black border-2 border-brand-100 inline-flex items-center shadow-lg w-full justify-center">
                                         <div className="w-2.5 h-2.5 rounded-full bg-brand-500 animate-pulse mr-2.5 shadow-[0_0_8px_rgba(99,102,241,0.6)]"></div>
-                                        Viewing: {format(new Date(selectedDate), 'MMM dd, yyyy')}
+                                        Viewing: Week {selectedWeek.weekNum}
                                     </div>
                                 )}
                             </AnimatedCard>
@@ -509,7 +621,7 @@ const AdminDashboard = () => {
                                             <Activity className="w-5 h-5 mr-3 text-slate-600" />
                                             Detailed Metrics Breakdown
                                         </h3>
-                                        <p className="text-sm text-slate-500 mt-1">Granular scores for current selected date segment.</p>
+                                        <p className="text-sm text-slate-500 mt-1">Granular scores for current selected week segment.</p>
                                     </div>
                                 </div>
                                 <div className="h-[250px] w-full">
@@ -542,20 +654,20 @@ const AdminDashboard = () => {
                                 <ShieldCheck className="w-5 h-5" />
                             </div>
                             <div>
-                                <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">Administrative Actions</h2>
+                                <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">Administrative Actions & Details</h2>
                                 <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Control Center</p>
                             </div>
                         </div>
 
                         <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
-                            {/* Raw History Data */}
+                            {/* Selected Week Feedback Stream */}
                             <AnimatedCard delay={0.9} className="xl:col-span-2 p-0 overflow-hidden bg-white border border-slate-200 shadow-xl rounded-3xl">
                                 <div className="p-6 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
                                     <h3 className="text-lg font-bold text-slate-800 flex items-center">
                                         <Calendar className="w-5 h-5 mr-3 text-slate-600" />
-                                        Raw Feedback Stream
+                                        Week {selectedWeek ? selectedWeek.weekNum : ''} Raw Feedbacks
                                     </h3>
-                                    <span className="px-3 py-1 bg-slate-200 text-slate-600 text-[10px] font-black rounded-full uppercase">All Entries</span>
+                                    <span className="px-3 py-1 bg-brand-100 text-brand-700 text-[10px] font-black rounded-full uppercase">Week View</span>
                                 </div>
                                 <div className="overflow-x-auto max-h-[500px] overflow-y-auto custom-scrollbar">
                                     <table className="w-full text-sm text-left">
@@ -568,7 +680,7 @@ const AdminDashboard = () => {
                                             </tr>
                                         </thead>
                                         <tbody className="divide-y divide-slate-100">
-                                            {allFeedbacks.map((fb) => (
+                                            {selectedWeek && selectedWeek.feedbacks.map((fb) => (
                                                 <tr key={fb._id} className="hover:bg-slate-50 transition-colors group">
                                                     <td className="px-8 py-6 align-top">
                                                         <div className="font-black text-slate-900 leading-none mb-1.5">Submitted</div>
@@ -611,10 +723,10 @@ const AdminDashboard = () => {
                                                     </td>
                                                 </tr>
                                             ))}
-                                            {allFeedbacks.length === 0 && (
+                                            {(!selectedWeek || selectedWeek.feedbacks.length === 0) && (
                                                 <tr>
                                                     <td colSpan="4" className="py-12 text-center text-slate-400 font-medium">
-                                                        No historical feedback records found in the database.
+                                                        No historical feedback records found for this week.
                                                     </td>
                                                 </tr>
                                             )}
@@ -627,24 +739,10 @@ const AdminDashboard = () => {
                             <AnimatedCard delay={1.0} className="xl:col-span-1 border-2 border-rose-50 bg-white shadow-xl shadow-rose-100 p-6 rounded-3xl h-full flex flex-col">
                                 <h3 className="text-lg font-extrabold text-slate-900 flex items-center mb-6 pb-4 border-b border-slate-100">
                                     <AlertTriangle className="w-5 h-5 mr-3 text-rose-500" />
-                                    System Maintenance
+                                    Danger Zone
                                 </h3>
                                 
-                                <div className="space-y-6 flex-1">
-                                    <div className="p-5 bg-slate-50 border border-slate-100 rounded-2xl">
-                                        <h4 className="font-bold text-slate-800 mb-2">Clear Daily Data</h4>
-                                        <p className="text-xs text-slate-500 leading-relaxed mb-4">
-                                            This will permanently delete all student feedbacks for the selected date. This action cannot be reversed.
-                                        </p>
-                                        <button 
-                                            onClick={handleResetDaily}
-                                            disabled={actionLoading}
-                                            className="w-full py-3 px-4 bg-white border border-rose-200 text-rose-600 font-bold rounded-xl text-sm transition-all hover:bg-rose-50 hover:border-rose-300 disabled:opacity-50"
-                                        >
-                                            {actionLoading ? 'Processing...' : 'Reset Daily Data'}
-                                        </button>
-                                    </div>
-
+                                <div className="space-y-6 flex-1 flex flex-col justify-end">
                                     <div className="p-5 bg-rose-50 border border-rose-100 rounded-2xl">
                                         <h4 className="font-bold text-rose-800 mb-2">Factory Reset</h4>
                                         <p className="text-xs text-rose-600/70 leading-relaxed mb-4">
@@ -662,7 +760,6 @@ const AdminDashboard = () => {
                             </AnimatedCard>
                         </div>
 
-
                         {/* Class Chat Group Management */}
                         <div className="mt-16 pt-12 border-t-2 border-slate-100">
                             <div className="flex items-center space-x-3 mb-8">
@@ -670,7 +767,7 @@ const AdminDashboard = () => {
                                     <MessageSquare className="w-5 h-5" />
                                 </div>
                                 <div>
-                                    <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">General Classroom Discussion</h2>
+                                    <h2 className="text-xl font-extrabold text-slate-900 tracking-tight">Doubt Clarification Chat</h2>
                                     <p className="text-xs font-bold text-slate-500 uppercase tracking-wider">Broadcasting to all Active Students</p>
                                 </div>
                             </div>
@@ -704,7 +801,7 @@ const AdminDashboard = () => {
                                                 <div key={chat._id} className={`flex flex-col max-w-[70%] ${isAdmin ? 'self-end items-end' : 'self-start items-start'}`}>
                                                     <span className="text-[11px] font-bold text-slate-400 mb-1.5 px-1 flex items-center">
                                                         {isAdmin && <ShieldCheck className="w-3 h-3 text-brand-500 mr-1" />}
-                                                        {isAdmin ? 'You (Admin)' : chat.sender?.name || 'Unknown Student'}
+                                                        {isAdmin ? 'You (Faculty)' : chat.sender?.name || 'Unknown Student'}
                                                     </span>
                                                     <div className={`px-5 py-3.5 rounded-2xl text-[15px] shadow-sm leading-relaxed ${isAdmin ? 'bg-indigo-600 text-white rounded-tr-sm border-0' : 'bg-white border text-slate-800 border-slate-200 rounded-tl-sm'}`}>
                                                         {chat.message}
@@ -724,7 +821,7 @@ const AdminDashboard = () => {
                                             type="text"
                                             value={chatMessage}
                                             onChange={(e) => setChatMessage(e.target.value)}
-                                            placeholder="Broadcast an announcement or reply..."
+                                            placeholder="Broadcast an announcement, notes, or reply..."
                                             className="w-full bg-slate-50 border border-slate-200 rounded-xl pl-5 pr-12 py-4 text-sm focus:ring-2 focus:ring-brand-500 outline-none transition-all shadow-inner font-medium text-slate-800"
                                         />
                                     </div>
@@ -739,10 +836,71 @@ const AdminDashboard = () => {
                             </AnimatedCard>
 
                         </div>
-
                     </div>
                 </motion.div>
             )}
+
+            {/* Upload Modal */}
+            <AnimatePresence>
+                {showUploadModal && (
+                    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+                        <div className="absolute inset-0 bg-slate-900/40 backdrop-blur-sm" onClick={() => setShowUploadModal(false)}></div>
+                        <motion.div 
+                            initial={{ opacity: 0, scale: 0.95, y: 10 }}
+                            animate={{ opacity: 1, scale: 1, y: 0 }}
+                            exit={{ opacity: 0, scale: 0.95, y: 10 }}
+                            className="bg-white rounded-3xl shadow-2xl overflow-hidden w-full max-w-md relative z-10 p-6 border border-slate-100"
+                        >
+                            <button onClick={() => setShowUploadModal(false)} className="absolute top-4 right-4 p-2 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-full transition-colors">
+                                <X className="w-5 h-5" />
+                            </button>
+                            
+                            <div className="w-12 h-12 rounded-2xl bg-brand-50 text-brand-600 flex items-center justify-center mb-4">
+                                <Upload className="w-6 h-6" />
+                            </div>
+                            <h3 className="text-xl font-black text-slate-900 shadow-sm border-b border-slate-100 pb-3">Upload Notes for {selectedUnitForUpload}</h3>
+                            
+                            <div className="mt-5">
+                                <div 
+                                    className="border-2 border-dashed border-slate-300 rounded-2xl p-8 hover:border-brand-400 hover:bg-brand-50/50 transition-colors flex flex-col items-center justify-center cursor-pointer mb-2"
+                                    onClick={() => fileInputRef.current?.click()}
+                                >
+                                    <BookOpen className="w-10 h-10 text-slate-300 mb-3" />
+                                    <p className="text-sm font-bold text-slate-600">
+                                        {selectedFile ? selectedFile.name : "Click to select a PDF file"}
+                                    </p>
+                                    <p className="text-xs text-slate-400 mt-1">PDF max 20MB</p>
+                                </div>
+                                <input 
+                                    type="file" 
+                                    accept="application/pdf"
+                                    ref={fileInputRef}
+                                    style={{ display: 'none' }}
+                                    onChange={handleFileChange}
+                                />
+                            </div>
+                            
+                            <div className="mt-6 flex space-x-3">
+                                <button
+                                    onClick={() => setShowUploadModal(false)}
+                                    className="flex-1 px-4 py-3 bg-slate-50 text-slate-700 font-bold rounded-xl hover:bg-slate-100 transition-colors"
+                                >
+                                    Cancel
+                                </button>
+                                <button
+                                    onClick={submitNoteUpload}
+                                    disabled={!selectedFile || isUploadingNote}
+                                    className="flex-1 px-4 py-3 bg-brand-600 text-white font-bold rounded-xl hover:bg-brand-700 transition-colors flex items-center justify-center disabled:opacity-50 shadow-md shadow-brand-500/30"
+                                >
+                                    {isUploadingNote ? <Loader2 className="w-5 h-5 animate-spin mr-2" /> : <Upload className="w-4 h-4 mr-2" />}
+                                    Upload
+                                </button>
+                            </div>
+                        </motion.div>
+                    </div>
+                )}
+            </AnimatePresence>
+
             </div>
         </BackgroundAnimation>
     );
