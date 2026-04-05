@@ -39,12 +39,12 @@ const Login = () => {
 
         setIsLoading(true);
         try {
-            await api.post('/auth/send-otp', { email: formData.email, type });
-            toast.success('OTP sent to your email!');
-            setCountdown(30);
             if (type === 'login') {
-                setView('login-otp');
+                setView('login-password');
             } else {
+                await api.post('/auth/send-otp', { email: formData.email, type });
+                toast.success('OTP sent to your email!');
+                setCountdown(30);
                 setView('forgot-otp');
             }
         } catch (error) {
@@ -80,8 +80,7 @@ const Login = () => {
         try {
             const res = await api.post('/auth/login', { 
                 email: formData.email, 
-                password: formData.password,
-                otpToken 
+                password: formData.password
             });
             login(res.data.token, res.data.user);
             toast.success('Welcome back!');
@@ -278,8 +277,8 @@ const Login = () => {
                         )}
 
                         {/* FLOW 2: OTP VERIFICATION */}
-                        {(view === 'login-otp' || view === 'forgot-otp') && (
-                            <form className="mt-10 space-y-6 relative z-10" onSubmit={(e) => handleVerifyOtp(e, view === 'login-otp' ? 'login' : 'reset')}>
+                        {view === 'forgot-otp' && (
+                            <form className="mt-10 space-y-6 relative z-10" onSubmit={(e) => handleVerifyOtp(e, 'reset')}>
                                 <p className="text-xs text-brand-600 text-center font-bold mb-6">OTP sent to: {formData.email}</p>
                                 <div className="group relative">
                                     <label className="block text-sm font-semibold text-slate-700 mb-1.5 ml-1">6-Digit OTP</label>
@@ -292,7 +291,7 @@ const Login = () => {
                                     {countdown > 0 ? (
                                         <span className="text-slate-500">Resend OTP in {countdown}s</span>
                                     ) : (
-                                        <button type="button" onClick={() => resendOtp(view === 'login-otp' ? 'login' : 'reset')} className="font-bold text-brand-600 hover:text-brand-500 focus:outline-none">
+                                        <button type="button" onClick={() => resendOtp('reset')} className="font-bold text-brand-600 hover:text-brand-500 focus:outline-none">
                                             Resend OTP
                                         </button>
                                     )}
